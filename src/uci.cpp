@@ -22,6 +22,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
 #include <iterator>
 #include <optional>
 #include <sstream>
@@ -38,7 +39,6 @@
 #include "search.h"
 #include "types.h"
 #include "ucioption.h"
-
 namespace Stockfish {
 
 constexpr auto BenchmarkCommand = "speedtest";
@@ -46,204 +46,149 @@ constexpr auto BenchmarkCommand = "speedtest";
 constexpr auto StartFEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 template<typename... Ts>
 struct overload: Ts... {
-    using Ts::operator()...;
-};
+   using Ts::operator()...;
+    };
 
-template<typename... Ts>
-overload(Ts...) -> overload<Ts...>;
+    template<typename... Ts>
+    overload(Ts...) -> overload<Ts...>;
 
-void UCIEngine::print_info_string(std::string_view str) {
-    sync_cout_start();
+    void UCIEngine::print_info_string(std::string_view str) {
+        sync_cout_start();
     for (auto& line : split(str, "\n"))
     {
         if (!is_whitespace(line))
         {
-            std::cout << "info string " << line << '\n';
+                std::cout << "info string " << line << '\n';
+            }
         }
+        sync_cout_end();
     }
-    sync_cout_end();
-}
 
 UCIEngine::UCIEngine(int argc, char** argv) :
     engine(argv[0]),
-    cli(argc, argv) {
+                                                  cli(argc, argv) {
 
-    engine.get_options().add_info_listener([](const std::optional<std::string>& str) {
-        if (str.has_value())
-            print_info_string(*str);
-    });
+        engine.get_options().add_info_listener([](const std::optional<std::string> &str) {
+            if (str.has_value())
+                print_info_string(*str);
+        });
 
-    init_search_update_listeners();
-}
+        init_search_update_listeners();
+    }
 
-void UCIEngine::init_search_update_listeners() {
-    engine.set_on_iter([](const auto& i) { on_iter(i); });
-    engine.set_on_update_no_moves([](const auto& i) { on_update_no_moves(i); });
-    engine.set_on_update_full(
-      [this](const auto& i) { on_update_full(i, engine.get_options()["UCI_ShowWDL"]); });
-    engine.set_on_bestmove([](const auto& bm, const auto& p) { on_bestmove(bm, p); });
-    engine.set_on_verify_networks([](const auto& s) { print_info_string(s); });
-}
+    void UCIEngine::init_search_update_listeners() {
+        engine.set_on_iter([](const auto &i) { on_iter(i); });
+        engine.set_on_update_no_moves([](const auto &i) { on_update_no_moves(i); });
+        engine.set_on_update_full(
+            [this](const auto &i) { on_update_full(i, engine.get_options()["UCI_ShowWDL"]); });
+        engine.set_on_bestmove([](const auto &bm, const auto &p) { on_bestmove(bm, p); });
+        engine.set_on_verify_networks([](const auto &s) { print_info_string(s); });
+    }
 
-void UCIEngine::loop() {
-    std::string token, cmd;
-
-    for (int i = 1; i < cli.argc; ++i)
-        cmd += std::string(cli.argv[i]) + " ";
-
-    do
-    {
-        if (cli.argc == 1
-            && !getline(std::cin, cmd))  // Wait for an input or an end-of-file (EOF) indication
-            cmd = "quit";
-
-        std::istringstream is(cmd);
-
-        token.clear();  // Avoid a stale if getline() returns nothing or a blank line
-        is >> std::skipws >> token;
-
-        if (token == "quit" || token == "stop")
-            engine.stop();
-
-        // The GUI sends 'ponderhit' to tell that the user has played the expected move.
-        // So, 'ponderhit' is sent if pondering was done on the same move that the user
-        // has played. The search should continue, but should also switch from pondering
-        // to the normal search.
-        else if (token == "ponderhit")
-            engine.set_ponderhit(false);
-
-        else if (token == "uci")
+    void UCIEngine::loop() {
+ 
         {
-            sync_cout << "id name " << engine_info(true) << "\n"
-                      << engine.get_options() << sync_endl;
+ 
+            std::vector<std::string> moves;
 
-            sync_cout << "uciok" << sync_endl;
+            // Apre il file in modalità lettura
+            std::ifstream epd_file("res.epd");
+
+            // Verifica se il file è stato aperto correttamente
+            if (!epd_file.is_open()) {
+                std::cerr << "Errore: impossibile aprire il file " << std::endl;
+                return;
+            }
+
+            // Legge ogni riga una per una
+            std::string fen;
+            size_t line_number = 0;
+            while (std::getline(epd_file, fen)) {
+                ++line_number;
+                std::cout << "Riga " << line_number << ": " << fen << std::endl;
+                engine.set_position(fen, moves);
+                engine.trace_eval();
+            }
+
+            // Verifica errori durante la lettura
+            if (epd_file.bad()) {
+                std::cerr << "Errore durante la lettura del file" << std::endl;
+            } else if (!epd_file.eof()) {
+                std::cerr << "Errore: lettura interrotta prima della fine del file" << std::endl;
+            }
+
+
         }
 
-        else if (token == "setoption")
-            setoption(is);
-        else if (token == "go")
-        {
-            // send info strings after the go command is sent for old GUIs and python-chess
-            print_info_string(engine.numa_config_information_as_string());
-            print_info_string(engine.thread_allocation_information_as_string());
-            go(is);
-        }
-        else if (token == "position")
-            position(is);
-        else if (token == "ucinewgame")
-            engine.search_clear();
-        else if (token == "isready")
-            sync_cout << "readyok" << sync_endl;
 
-        // Add custom non-UCI commands, mainly for debugging purposes.
-        // These commands must not be used during a search!
-        else if (token == "flip")
-            engine.flip();
-        else if (token == "bench")
-            bench(is);
-        else if (token == BenchmarkCommand)
-            benchmark(is);
-        else if (token == "d")
-            sync_cout << engine.visualize() << sync_endl;
-        else if (token == "eval")
-            engine.trace_eval();
-        else if (token == "compiler")
-            sync_cout << compiler_info() << sync_endl;
-        else if (token == "export_net")
-        {
-            std::pair<std::optional<std::string>, std::string> files[2];
+    }
 
-            if (is >> std::skipws >> files[0].second)
-                files[0].first = files[0].second;
+    Search::LimitsType UCIEngine::parse_limits(std::istream &is) {
+        Search::LimitsType limits;
+        std::string token;
 
-            if (is >> std::skipws >> files[1].second)
-                files[1].first = files[1].second;
+        limits.startTime = now(); // The search starts as early as possible
 
-            engine.save_network(files);
-        }
-        else if (token == "--help" || token == "help" || token == "--license" || token == "license")
-            sync_cout
-              << "\nStockfish is a powerful chess engine for playing and analyzing."
-                 "\nIt is released as free software licensed under the GNU GPLv3 License."
-                 "\nStockfish is normally used with a graphical user interface (GUI) and implements"
-                 "\nthe Universal Chess Interface (UCI) protocol to communicate with a GUI, an API, etc."
-                 "\nFor any further information, visit https://github.com/official-stockfish/Stockfish#readme"
-                 "\nor read the corresponding README.md and Copying.txt files distributed along with this program.\n"
-              << sync_endl;
-        else if (!token.empty() && token[0] != '#')
-            sync_cout << "Unknown command: '" << cmd << "'. Type help for more information."
-                      << sync_endl;
+        while (is >> token)
+            if (token == "searchmoves") // Needs to be the last command on the line
+                while (is >> token)
+                    limits.searchmoves.push_back(to_lower(token));
 
-    } while (token != "quit" && cli.argc == 1);  // The command-line arguments are one-shot
-}
+            else if (token == "wtime")
+                is >> limits.time[WHITE];
+            else if (token == "btime")
+                is >> limits.time[BLACK];
+            else if (token == "winc")
+                is >> limits.inc[WHITE];
+            else if (token == "binc")
+                is >> limits.inc[BLACK];
+            else if (token == "movestogo")
+                is >> limits.movestogo;
+            else if (token == "depth")
+                is >> limits.depth;
+            else if (token == "nodes")
+                is >> limits.nodes;
+            else if (token == "movetime")
+                is >> limits.movetime;
+            else if (token == "mate")
+                is >> limits.mate;
+            else if (token == "perft")
+                is >> limits.perft;
+            else if (token == "infinite")
+                limits.infinite = 1;
+            else if (token == "ponder")
+                limits.ponderMode = true;
 
-Search::LimitsType UCIEngine::parse_limits(std::istream& is) {
-    Search::LimitsType limits;
-    std::string        token;
+        return limits;
+    }
 
-    limits.startTime = now();  // The search starts as early as possible
+    void UCIEngine::go(std::istringstream &is) {
 
-    while (is >> token)
-        if (token == "searchmoves")  // Needs to be the last command on the line
-            while (is >> token)
-                limits.searchmoves.push_back(to_lower(token));
+        Search::LimitsType limits = parse_limits(is);
 
-        else if (token == "wtime")
-            is >> limits.time[WHITE];
-        else if (token == "btime")
-            is >> limits.time[BLACK];
-        else if (token == "winc")
-            is >> limits.inc[WHITE];
-        else if (token == "binc")
-            is >> limits.inc[BLACK];
-        else if (token == "movestogo")
-            is >> limits.movestogo;
-        else if (token == "depth")
-            is >> limits.depth;
-        else if (token == "nodes")
-            is >> limits.nodes;
-        else if (token == "movetime")
-            is >> limits.movetime;
-        else if (token == "mate")
-            is >> limits.mate;
-        else if (token == "perft")
-            is >> limits.perft;
-        else if (token == "infinite")
-            limits.infinite = 1;
-        else if (token == "ponder")
-            limits.ponderMode = true;
+        if (limits.perft)
+            perft(limits);
+        else
+            engine.go(limits);
+    }
 
-    return limits;
-}
+    void UCIEngine::bench(std::istream &args) {
+        std::string token;
+        uint64_t num, nodes = 0, cnt = 1;
+        uint64_t nodesSearched = 0;
+        const auto &options = engine.get_options();
 
-void UCIEngine::go(std::istringstream& is) {
+        engine.set_on_update_full([&](const auto &i) {
+            nodesSearched = i.nodes;
+            on_update_full(i, options["UCI_ShowWDL"]);
+        });
 
-    Search::LimitsType limits = parse_limits(is);
+        std::vector<std::string> list = Benchmark::setup_bench(engine.fen(), args);
 
-    if (limits.perft)
-        perft(limits);
-    else
-        engine.go(limits);
-}
+        num = count_if(list.begin(), list.end(),
+                       [](const std::string &s) { return s.find("go ") == 0 || s.find("eval") == 0; });
 
-void UCIEngine::bench(std::istream& args) {
-    std::string token;
-    uint64_t    num, nodes = 0, cnt = 1;
-    uint64_t    nodesSearched = 0;
-    const auto& options       = engine.get_options();
-
-    engine.set_on_update_full([&](const auto& i) {
-        nodesSearched = i.nodes;
-        on_update_full(i, options["UCI_ShowWDL"]);
-    });
-
-    std::vector<std::string> list = Benchmark::setup_bench(engine.fen(), args);
-
-    num = count_if(list.begin(), list.end(),
-                   [](const std::string& s) { return s.find("go ") == 0 || s.find("eval") == 0; });
-
-    TimePoint elapsed = now();
+        TimePoint elapsed = now();
 
     for (const auto& cmd : list)
     {
@@ -419,17 +364,17 @@ void UCIEngine::benchmark(std::istream& args) {
 
     totalTime = std::max<TimePoint>(totalTime, 1);  // Ensure positivity to avoid a 'divide by zero'
 
-    dbg_print();
+        dbg_print();
 
-    std::cerr << "\n";
+        std::cerr << "\n";
 
-    static_assert(
-      std::size(hashfullAges) == 2 && hashfullAges[0] == 0 && hashfullAges[1] == 999,
-      "Hardcoded for display. Would complicate the code needlessly in the current state.");
+        static_assert(
+            std::size(hashfullAges) == 2 && hashfullAges[0] == 0 && hashfullAges[1] == 999,
+            "Hardcoded for display. Would complicate the code needlessly in the current state.");
 
-    std::string threadBinding = engine.thread_binding_information_as_string();
-    if (threadBinding.empty())
-        threadBinding = "none";
+        std::string threadBinding = engine.thread_binding_information_as_string();
+        if (threadBinding.empty())
+            threadBinding = "none";
 
     // clang-format off
 
@@ -455,213 +400,213 @@ void UCIEngine::benchmark(std::istream& args) {
               << "\nTotal search time [s]      : " << totalTime / 1000.0
               << "\nNodes/second               : " << 1000 * nodes / totalTime << std::endl;
 
-    // clang-format on
+        // clang-format on
 
-    init_search_update_listeners();
-}
+        init_search_update_listeners();
+    }
 
-void UCIEngine::setoption(std::istringstream& is) {
-    engine.wait_for_search_finished();
-    engine.get_options().setoption(is);
-}
+    void UCIEngine::setoption(std::istringstream &is) {
+        engine.wait_for_search_finished();
+        engine.get_options().setoption(is);
+    }
 
-std::uint64_t UCIEngine::perft(const Search::LimitsType& limits) {
-    auto nodes = engine.perft(engine.fen(), limits.perft, engine.get_options()["UCI_Chess960"]);
-    sync_cout << "\nNodes searched: " << nodes << "\n" << sync_endl;
-    return nodes;
-}
+    std::uint64_t UCIEngine::perft(const Search::LimitsType &limits) {
+        auto nodes = engine.perft(engine.fen(), limits.perft, engine.get_options()["UCI_Chess960"]);
+        sync_cout << "\nNodes searched: " << nodes << "\n" << sync_endl;
+        return nodes;
+    }
 
-void UCIEngine::position(std::istringstream& is) {
-    std::string token, fen;
+    void UCIEngine::position(std::istringstream &is) {
+        std::string token, fen;
 
-    is >> token;
+        is >> token;
 
     if (token == "startpos")
     {
-        fen = StartFEN;
-        is >> token;  // Consume the "moves" token, if any
+            fen = StartFEN;
+            is >> token; // Consume the "moves" token, if any
     }
     else if (token == "fen")
-        while (is >> token && token != "moves")
-            fen += token + " ";
-    else
-        return;
+            while (is >> token && token != "moves")
+                fen += token + " ";
+        else
+            return;
 
-    std::vector<std::string> moves;
+        std::vector<std::string> moves;
 
     while (is >> token)
     {
-        moves.push_back(token);
-    }
+            moves.push_back(token);
+        }
 
     engine.set_position(fen, moves);
-}
+    }
 
-namespace {
+    namespace {
 
-struct WinRateParams {
-    double a;
-    double b;
-};
+        struct WinRateParams {
+            double a;
+            double b;
+        };
 
-WinRateParams win_rate_params(const Position& pos) {
+        WinRateParams win_rate_params(const Position &pos) {
 
-    int material = pos.count<PAWN>() + 3 * pos.count<KNIGHT>() + 3 * pos.count<BISHOP>()
-                 + 5 * pos.count<ROOK>() + 9 * pos.count<QUEEN>();
+            int material = pos.count<PAWN>() + 3 * pos.count<KNIGHT>() + 3 * pos.count<BISHOP>()
+                           + 5 * pos.count<ROOK>() + 9 * pos.count<QUEEN>();
 
-    // The fitted model only uses data for material counts in [17, 78], and is anchored at count 58.
-    double m = std::clamp(material, 17, 78) / 58.0;
+            // The fitted model only uses data for material counts in [17, 78], and is anchored at count 58.
+            double m = std::clamp(material, 17, 78) / 58.0;
 
-    // Return a = p_a(material) and b = p_b(material), see github.com/official-stockfish/WDL_model
-    constexpr double as[] = {-13.50030198, 40.92780883, -36.82753545, 386.83004070};
-    constexpr double bs[] = {96.53354896, -165.79058388, 90.89679019, 49.29561889};
+            // Return a = p_a(material) and b = p_b(material), see github.com/official-stockfish/WDL_model
+            constexpr double as[] = {-13.50030198, 40.92780883, -36.82753545, 386.83004070};
+            constexpr double bs[] = {96.53354896, -165.79058388, 90.89679019, 49.29561889};
 
-    double a = (((as[0] * m + as[1]) * m + as[2]) * m) + as[3];
-    double b = (((bs[0] * m + bs[1]) * m + bs[2]) * m) + bs[3];
+            double a = (((as[0] * m + as[1]) * m + as[2]) * m) + as[3];
+            double b = (((bs[0] * m + bs[1]) * m + bs[2]) * m) + bs[3];
 
-    return {a, b};
-}
+            return {a, b};
+        }
 
-// The win rate model is 1 / (1 + exp((a - eval) / b)), where a = p_a(material) and b = p_b(material).
-// It fits the LTC fishtest statistics rather accurately.
-int win_rate_model(Value v, const Position& pos) {
+        // The win rate model is 1 / (1 + exp((a - eval) / b)), where a = p_a(material) and b = p_b(material).
+        // It fits the LTC fishtest statistics rather accurately.
+        int win_rate_model(Value v, const Position &pos) {
 
-    auto [a, b] = win_rate_params(pos);
+            auto [a, b] = win_rate_params(pos);
 
-    // Return the win rate in per mille units, rounded to the nearest integer.
-    return int(0.5 + 1000 / (1 + std::exp((a - double(v)) / b)));
-}
-}
+            // Return the win rate in per mille units, rounded to the nearest integer.
+            return int(0.5 + 1000 / (1 + std::exp((a - double(v)) / b)));
+        }
+    }
 
-std::string UCIEngine::format_score(const Score& s) {
-    constexpr int TB_CP = 20000;
-    const auto    format =
+    std::string UCIEngine::format_score(const Score &s) {
+        constexpr int TB_CP = 20000;
+        const auto format =
       overload{[](Score::Mate mate) -> std::string {
-                   auto m = (mate.plies > 0 ? (mate.plies + 1) : mate.plies) / 2;
-                   return std::string("mate ") + std::to_string(m);
-               },
-               [](Score::Tablebase tb) -> std::string {
-                   return std::string("cp ")
-                        + std::to_string((tb.win ? TB_CP - tb.plies : -TB_CP - tb.plies));
-               },
-               [](Score::InternalUnits units) -> std::string {
-                   return std::string("cp ") + std::to_string(units.value);
-               }};
+                        auto m = (mate.plies > 0 ? (mate.plies + 1) : mate.plies) / 2;
+                        return std::string("mate ") + std::to_string(m);
+                    },
+                    [](Score::Tablebase tb) -> std::string {
+                        return std::string("cp ")
+                               + std::to_string((tb.win ? TB_CP - tb.plies : -TB_CP - tb.plies));
+                    },
+                    [](Score::InternalUnits units) -> std::string {
+                        return std::string("cp ") + std::to_string(units.value);
+                    }
+                };
 
-    return s.visit(format);
-}
+        return s.visit(format);
+    }
 
-// Turns a Value to an integer centipawn number,
-// without treatment of mate and similar special scores.
-int UCIEngine::to_cp(Value v, const Position& pos) {
+    // Turns a Value to an integer centipawn number,
+    // without treatment of mate and similar special scores.
+    int UCIEngine::to_cp(Value v, const Position &pos) {
+        // In general, the score can be defined via the WDL as
+        // (log(1/L - 1) - log(1/W - 1)) / (log(1/L - 1) + log(1/W - 1)).
+        // Based on our win_rate_model, this simply yields v / a.
 
-    // In general, the score can be defined via the WDL as
-    // (log(1/L - 1) - log(1/W - 1)) / (log(1/L - 1) + log(1/W - 1)).
-    // Based on our win_rate_model, this simply yields v / a.
+        auto [a, b] = win_rate_params(pos);
 
-    auto [a, b] = win_rate_params(pos);
+        return std::round(100 * int(v) / a);
+    }
 
-    return std::round(100 * int(v) / a);
-}
+    std::string UCIEngine::wdl(Value v, const Position &pos) {
+        std::stringstream ss;
 
-std::string UCIEngine::wdl(Value v, const Position& pos) {
-    std::stringstream ss;
+        int wdl_w = win_rate_model(v, pos);
+        int wdl_l = win_rate_model(-v, pos);
+        int wdl_d = 1000 - wdl_w - wdl_l;
+        ss << wdl_w << " " << wdl_d << " " << wdl_l;
 
-    int wdl_w = win_rate_model(v, pos);
-    int wdl_l = win_rate_model(-v, pos);
-    int wdl_d = 1000 - wdl_w - wdl_l;
-    ss << wdl_w << " " << wdl_d << " " << wdl_l;
+        return ss.str();
+    }
 
-    return ss.str();
-}
+    std::string UCIEngine::square(Square s) {
+        return std::string{char('a' + file_of(s)), char('1' + rank_of(s))};
+    }
 
-std::string UCIEngine::square(Square s) {
-    return std::string{char('a' + file_of(s)), char('1' + rank_of(s))};
-}
+    std::string UCIEngine::move(Move m, bool chess960) {
+        if (m == Move::none())
+            return "(none)";
 
-std::string UCIEngine::move(Move m, bool chess960) {
-    if (m == Move::none())
-        return "(none)";
+        if (m == Move::null())
+            return "0000";
 
-    if (m == Move::null())
-        return "0000";
+        Square from = m.from_sq();
+        Square to = m.to_sq();
 
-    Square from = m.from_sq();
-    Square to   = m.to_sq();
+        if (m.type_of() == CASTLING && !chess960)
+            to = make_square(to > from ? FILE_G : FILE_C, rank_of(from));
 
-    if (m.type_of() == CASTLING && !chess960)
-        to = make_square(to > from ? FILE_G : FILE_C, rank_of(from));
+        std::string move = square(from) + square(to);
 
-    std::string move = square(from) + square(to);
+        if (m.type_of() == PROMOTION)
+            move += " pnbrqk"[m.promotion_type()];
 
-    if (m.type_of() == PROMOTION)
-        move += " pnbrqk"[m.promotion_type()];
-
-    return move;
-}
+        return move;
+    }
 
 
-std::string UCIEngine::to_lower(std::string str) {
-    std::transform(str.begin(), str.end(), str.begin(), [](auto c) { return std::tolower(c); });
+    std::string UCIEngine::to_lower(std::string str) {
+        std::transform(str.begin(), str.end(), str.begin(), [](auto c) { return std::tolower(c); });
 
-    return str;
-}
+        return str;
+    }
 
-Move UCIEngine::to_move(const Position& pos, std::string str) {
-    str = to_lower(str);
+    Move UCIEngine::to_move(const Position &pos, std::string str) {
+        str = to_lower(str);
 
-    for (const auto& m : MoveList<LEGAL>(pos))
-        if (str == move(m, pos.is_chess960()))
-            return m;
+        for (const auto &m: MoveList<LEGAL>(pos))
+            if (str == move(m, pos.is_chess960()))
+                return m;
 
-    return Move::none();
-}
+        return Move::none();
+    }
 
-void UCIEngine::on_update_no_moves(const Engine::InfoShort& info) {
-    sync_cout << "info depth " << info.depth << " score " << format_score(info.score) << sync_endl;
-}
+    void UCIEngine::on_update_no_moves(const Engine::InfoShort &info) {
+        sync_cout << "info depth " << info.depth << " score " << format_score(info.score) << sync_endl;
+    }
 
-void UCIEngine::on_update_full(const Engine::InfoFull& info, bool showWDL) {
-    std::stringstream ss;
+    void UCIEngine::on_update_full(const Engine::InfoFull &info, bool showWDL) {
+        std::stringstream ss;
 
-    ss << "info";
-    ss << " depth " << info.depth                 //
-       << " seldepth " << info.selDepth           //
-       << " multipv " << info.multiPV             //
-       << " score " << format_score(info.score);  //
+        ss << "info";
+        ss << " depth " << info.depth //
+                << " seldepth " << info.selDepth //
+                << " multipv " << info.multiPV //
+                << " score " << format_score(info.score); //
 
-    if (!info.bound.empty())
-        ss << " " << info.bound;
+        if (!info.bound.empty())
+            ss << " " << info.bound;
 
-    if (showWDL)
-        ss << " wdl " << info.wdl;
+        if (showWDL)
+            ss << " wdl " << info.wdl;
 
-    ss << " nodes " << info.nodes        //
-       << " nps " << info.nps            //
-       << " hashfull " << info.hashfull  //
-       << " tbhits " << info.tbHits      //
-       << " time " << info.timeMs        //
-       << " pv " << info.pv;             //
+        ss << " nodes " << info.nodes //
+                << " nps " << info.nps //
+                << " hashfull " << info.hashfull //
+                << " tbhits " << info.tbHits //
+                << " time " << info.timeMs //
+                << " pv " << info.pv; //
 
-    sync_cout << ss.str() << sync_endl;
-}
+        sync_cout << ss.str() << sync_endl;
+    }
 
-void UCIEngine::on_iter(const Engine::InfoIter& info) {
-    std::stringstream ss;
+    void UCIEngine::on_iter(const Engine::InfoIter &info) {
+        std::stringstream ss;
 
-    ss << "info";
-    ss << " depth " << info.depth                     //
-       << " currmove " << info.currmove               //
-       << " currmovenumber " << info.currmovenumber;  //
+        ss << "info";
+        ss << " depth " << info.depth //
+                << " currmove " << info.currmove //
+                << " currmovenumber " << info.currmovenumber; //
 
-    sync_cout << ss.str() << sync_endl;
-}
+        sync_cout << ss.str() << sync_endl;
+    }
 
-void UCIEngine::on_bestmove(std::string_view bestmove, std::string_view ponder) {
-    sync_cout << "bestmove " << bestmove;
-    if (!ponder.empty())
-        std::cout << " ponder " << ponder;
-    std::cout << sync_endl;
-}
+    void UCIEngine::on_bestmove(std::string_view bestmove, std::string_view ponder) {
+        sync_cout << "bestmove " << bestmove;
+        if (!ponder.empty())
+            std::cout << " ponder " << ponder;
+        std::cout << sync_endl;
+    }
 
-}  // namespace Stockfish
+} // namespace Stockfish
